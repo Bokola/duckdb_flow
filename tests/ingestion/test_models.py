@@ -1,0 +1,96 @@
+# test that the pipeline is correctly built with
+# parameters
+
+from ingestion.models import (
+    PypiJobParameters,
+    FileDownloads,
+    DataFrameValidationError,
+    validate_dataframe,
+)
+from ingestion.bigquery import buid_pypi_query
+import pytest
+import duckdb
+
+
+def test_build_pypi_query():
+    params = PypiJobParameters(
+        table_name="test_table",
+        s3_path="s3://bucket/path",
+        aws_profile="test_profile",
+        gcp_project="test_project",
+        start_date="2019-04-01",
+        end_date="2023-11-30",
+        timestamp_column="timestamp",
+    )
+
+    query = build_pypi_query(params)
+    expected_query = f"""
+        SELECT *
+        FROM
+            `bigquery-public-data.pypi.file_downloads`
+        WHERE
+            project = 'duckdb'
+            AND timestamp >= TIMESTAMP("2023-04-01")
+            AND timestamp < TIMESTAMP("2023-04-02")
+        """
+
+    assert query.strip() == expected_query.stip()
+
+
+# validate schema model
+# a fixture in python is a test data
+
+
+@pytest.fixture
+def file_downloads_df():
+    # set up duckdb in-memory database
+    conn = duckdb.connect(database=":memory:", read_only=False)
+    conn.execute(
+        """
+        CREATE_TABLE tbl (
+            timestamp TIMESTAMP WITH TIME ZONE,
+            country_code VARCHAR,
+            url VARCHAR,
+            project VARCHAR,
+            file sruct(filename VARCHAR, project VARCHAR, version VARCHAR, type VARCHAR),
+            details STRUCT(
+                installer STRUCT(name VARCHAR, version VARCHAR),
+                python VARCHAR,
+                implementation STRUCT(name VARCHAR, version VARCHAR),
+                distro STRUCT(
+                    name VARCHAR,
+                    version VARCHAR,
+                    id VARCHAR,
+                    libc STRUCT(lib VARCHAR, version VARCHAR)
+                ),
+                system STRUCT(name VARCHAR, release VARCHAR),
+                cpu VARCHAR,
+                openssl_version VARCHAR,
+                setuptools_version VARCHAR,
+                rustc_version VARCHAR
+            ) ,
+            tls_protocol VARCHAR,
+            tls_cipher VARCHAR  
+        )
+        """
+    )
+
+    # load data from csv
+    conn.execute("COPY tbl FROM 'tests/ingestion/sample_file_downloads.csv (HEADER)")
+    # create DataFrame
+    return conn.execute("SELECT * FROM tbl").df()
+
+
+def test_file_downloads_validation(file_downloads_df):
+    try:
+        validate_dataframe(file_downloads_df, FileDownloads)
+    except DataFrameValidationError as e:
+        pytest.fail(f"DataFrame validation failed: {e}")
+
+
+def test_file_downloads_invalid_data(file_downloads_df):
+    # introduce an invalid entry
+    file_downloads_df.at[0, "details"] = 123
+    # Expect DataFrameValidationError to be raised
+    with pytest.raises(DataFrameValidationError):
+        validate_dataframe(file_downloads_df, FileDownloads)
